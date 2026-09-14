@@ -1,0 +1,17 @@
+{
+  "name": "aska-userscripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Collection of browser userscripts for Tampermonkey / Violentmonkey",
+  "scripts": {
+    "test": "echo \"No tests specified yet\" && exit 0"
+  },
+  "keywords": [
+    "userscripts",
+    "tampermonkey",
+    "violentmonkey",
+    "greasemonkey"
+  ],
+  "author": "",
+  "license": "MIT"
+}

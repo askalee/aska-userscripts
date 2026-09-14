@@ -1,0 +1,49 @@
+name: Sync README Install Links
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update Raw URLs in READMEs
+        run: |
+          python3 -c "
+          import os, re, glob
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          ref = os.environ.get('GITHUB_REF_NAME', 'main')
+          pattern = re.compile(r'https://raw\.githubusercontent\.com/[^/\s\)]+/[^/\s\)]+/[^/\s\)]+/')
+          target = f'https://raw.githubusercontent.com/{repo}/{ref}/'
+
+          for path in glob.glob('**/README.md', recursive=True):
+              with open(path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              new_content = pattern.sub(target, content)
+              if new_content != content:
+                  with open(path, 'w', encoding='utf-8') as f:
+                      f.write(new_content)
+                  print(f'Updated: {path}')
+          "
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add "**/README.md"
+            git commit -m "chore(docs): sync install links with current repository"
+            git push
+          else
+            echo "No URL updates needed."
+          fi
