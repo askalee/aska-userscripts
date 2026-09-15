@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         GitHub Commit Mermaid Renderer
 // @namespace    github-commit-mermaid
-// @version      4.1.0
+// @version      4.2.0
 // @description  Replace Mermaid source blocks in GitHub commit messages with vertically stacked rendered diagrams.
 // @match        https://github.com/*
-// @require      https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js
+// @require      https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js
 // @run-at       document-idle
 // @grant        GM_addStyle
 // @sandbox      DOM
