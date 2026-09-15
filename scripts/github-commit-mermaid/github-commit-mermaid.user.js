@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Commit Mermaid Renderer
 // @namespace    github-commit-mermaid
-// @version      4.3.1
+// @version      4.4.0
 // @description  Replace Mermaid source blocks in GitHub commit messages with vertically stacked rendered diagrams.
 // @match        https://github.com/*
 // @require      https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js
@@ -12,7 +12,30 @@
 (() => {
   'use strict';
 
+  const CONTAINER_ID = 'github-commit-mermaid-controls';
   const BUTTON_ID = 'github-commit-mermaid-button';
+  const SETTINGS_BTN_ID = 'github-commit-mermaid-settings-btn';
+  const SETTINGS_PANEL_ID = 'github-commit-mermaid-settings-panel';
+
+  const SETTINGS_STORAGE_KEY = 'github-commit-mermaid-settings';
+
+  const AVAILABLE_THEMES = [
+    'auto',
+    'default',
+    'neutral',
+    'dark',
+    'forest',
+    'base',
+  ];
+
+  const THEME_LABELS = {
+    auto: 'Auto (跟隨系統 / GitHub 外觀)',
+    default: 'Default (經典淺色)',
+    neutral: 'Neutral (簡潔灰階)',
+    dark: 'Dark (深色模式)',
+    forest: 'Forest (森林綠)',
+    base: 'Base (簡約底色)',
+  };
 
   const REPLACEMENT_ATTRIBUTE =
     'data-github-commit-mermaid-replacement';
@@ -28,6 +51,7 @@
 
   let mermaidInitialized = false;
   let installScheduled = false;
+  let originalCommitElementSnapshot = null;
 
   addStyles();
   scheduleInstall();
@@ -58,6 +82,28 @@
     },
   );
 
+  /*
+   * Close settings panel on outside click or ESC key.
+   */
+  document.addEventListener('click', (event) => {
+    const panel = document.getElementById(SETTINGS_PANEL_ID);
+    const settingsBtn = document.getElementById(SETTINGS_BTN_ID);
+
+    if (
+      panel &&
+      !panel.contains(event.target) &&
+      !settingsBtn?.contains(event.target)
+    ) {
+      panel.remove();
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      document.getElementById(SETTINGS_PANEL_ID)?.remove();
+    }
+  });
+
   function scheduleInstall() {
     if (installScheduled) {
       return;
@@ -67,7 +113,7 @@
 
     window.setTimeout(() => {
       installScheduled = false;
-      installButton();
+      installControls();
     }, 300);
   }
 
@@ -77,63 +123,301 @@
     );
   }
 
-  function installButton() {
+  function loadSettings() {
+    try {
+      const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return {
+          classDiagramTheme: AVAILABLE_THEMES.includes(parsed.classDiagramTheme)
+            ? parsed.classDiagramTheme
+            : 'auto',
+          generalTheme: AVAILABLE_THEMES.includes(parsed.generalTheme)
+            ? parsed.generalTheme
+            : 'auto',
+        };
+      }
+    } catch (error) {
+      console.warn('[GitHub Commit Mermaid] Failed to load settings:', error);
+    }
+
+    return {
+      classDiagramTheme: 'auto',
+      generalTheme: 'auto',
+    };
+  }
+
+  function saveSettings(settings) {
+    try {
+      localStorage.setItem(
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify(settings),
+      );
+    } catch (error) {
+      console.warn('[GitHub Commit Mermaid] Failed to save settings:', error);
+    }
+  }
+
+  function isGitHubDarkTheme() {
+    const githubColorMode =
+      document.documentElement.getAttribute('data-color-mode');
+
+    const computedColorScheme =
+      window.getComputedStyle(document.documentElement).colorScheme;
+
+    const prefersDark =
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    return (
+      githubColorMode === 'dark' ||
+      computedColorScheme.includes('dark') ||
+      (githubColorMode === 'auto' && prefersDark)
+    );
+  }
+
+  function isClassDiagramSource(source) {
+    return /(?:^|\n)\s*classDiagram\b/i.test(source);
+  }
+
+  function resolveTheme(configuredTheme, useDarkTheme) {
+    if (!configuredTheme || configuredTheme === 'auto') {
+      return useDarkTheme ? 'dark' : 'default';
+    }
+    return configuredTheme;
+  }
+
+  function applyThemeDirective(source, targetTheme) {
+    if (!targetTheme) {
+      return source;
+    }
+
+    const initRegex = /^\s*%%\{init:\s*(\{[\s\S]*?\})\s*\}%%\s*(?:\r?\n|$)/i;
+    const match = source.match(initRegex);
+
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        parsed.theme = targetTheme;
+        return source.replace(initRegex, `%%{init: ${JSON.stringify(parsed)}}%%\n`);
+      } catch {
+        if (/['"]?theme['"]?\s*:\s*['"][^'"]+['"]/i.test(match[1])) {
+          const replaced = match[0].replace(
+            /(['"]?theme['"]?\s*:\s*)['"][^'"]+['"]/i,
+            `$1'${targetTheme}'`,
+          );
+          return source.replace(match[0], replaced);
+        }
+      }
+    }
+
+    return `%%{init: {'theme': '${targetTheme}'}}%%\n${source}`;
+  }
+
+  function installControls() {
     if (!isCommitPage()) {
-      document
-        .getElementById(BUTTON_ID)
-        ?.remove();
-
+      document.getElementById(CONTAINER_ID)?.remove();
+      document.getElementById(SETTINGS_PANEL_ID)?.remove();
       return;
     }
 
-    if (document.getElementById(BUTTON_ID)) {
+    if (document.getElementById(CONTAINER_ID)) {
       return;
     }
 
-    const button =
-      document.createElement('button');
+    const container = document.createElement('div');
+    container.id = CONTAINER_ID;
 
+    const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
     button.textContent = 'Render Mermaid';
 
     button.addEventListener('click', () => {
-      void replaceMermaidBlocks(button);
+      const isAlreadyRendered = Boolean(
+        document.querySelector(
+          `[${REPLACEMENT_ATTRIBUTE}="true"]`,
+        ),
+      );
+      void replaceMermaidBlocks({ button, force: isAlreadyRendered });
     });
 
-    document.body.append(button);
+    const settingsBtn = document.createElement('button');
+    settingsBtn.id = SETTINGS_BTN_ID;
+    settingsBtn.type = 'button';
+    settingsBtn.title = 'Mermaid 渲染設定 (類別圖與主題)';
+    settingsBtn.setAttribute('aria-label', 'Mermaid 渲染設定');
+    settingsBtn.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" style="display: block;">
+        <path d="M8 0a8.2 8.2 0 00-.734.032.75.75 0 00-.67.625l-.261 1.706a5.5 5.5 0 00-1.226.507L3.65 1.794a.75.75 0 00-.916.155l-.756.91a.75.75 0 00-.09.919l.995 1.41a5.5 5.5 0 00-.507 1.226L.67 6.675a.75.75 0 00-.638.734v1.182a.75.75 0 00.638.734l1.706.261c.123.432.296.845.507 1.226l-1.076 1.459a.75.75 0 00.09.919l.756.91a.75.75 0 00.916.155l1.459-1.076c.381.211.794.384 1.226.507l.261 1.706a.75.75 0 00.734.638h1.182a.75.75 0 00.734-.638l.261-1.706a5.5 5.5 0 001.226-.507l1.459 1.076a.75.75 0 00.916-.155l.756-.91a.75.75 0 00.09-.919l-1.076-1.459c.211-.381.384-.794.507-1.226l1.706-.261a.75.75 0 00.638-.734V7.409a.75.75 0 00-.638-.734l-1.706-.261a5.5 5.5 0 00-.507-1.226l1.076-1.459a.75.75 0 00-.09-.919l-.756-.91a.75.75 0 00-.916-.155l-1.459 1.076a5.5 5.5 0 00-1.226-.507l-.261-1.706A.75.75 0 008.591.032 8.2 8.2 0 008 0zm0 5.5a2.5 2.5 0 110 5 2.5 2.5 0 010-5z"></path>
+      </svg>
+    `;
+
+    settingsBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleSettingsPanel();
+    });
+
+    container.append(button, settingsBtn);
+    document.body.append(container);
   }
 
-  async function replaceMermaidBlocks(button) {
-    button.disabled = true;
-    button.textContent = 'Finding Mermaid…';
+  function toggleSettingsPanel() {
+    const existing = document.getElementById(SETTINGS_PANEL_ID);
+    if (existing) {
+      existing.remove();
+      return;
+    }
 
-    try {
-      /*
-       * Do not render twice.
-       */
+    const settings = loadSettings();
+    const panel = document.createElement('div');
+    panel.id = SETTINGS_PANEL_ID;
+    panel.className = 'github-commit-mermaid-settings-panel';
+
+    const header = document.createElement('div');
+    header.className = 'github-commit-mermaid-settings-header';
+    header.innerHTML = `
+      <span style="font-weight: 600; font-size: 13px;">Mermaid 渲染主題設定</span>
+      <button type="button" class="github-commit-mermaid-close-btn" aria-label="關閉">✕</button>
+    `;
+
+    header
+      .querySelector('.github-commit-mermaid-close-btn')
+      .addEventListener('click', () => {
+        panel.remove();
+      });
+
+    const body = document.createElement('div');
+    body.className = 'github-commit-mermaid-settings-body';
+
+    function createSelectGroup(labelText, id, currentValue) {
+      const group = document.createElement('div');
+      group.className = 'github-commit-mermaid-setting-group';
+
+      const label = document.createElement('label');
+      label.htmlFor = id;
+      label.textContent = labelText;
+
+      const select = document.createElement('select');
+      select.id = id;
+
+      AVAILABLE_THEMES.forEach((themeKey) => {
+        const option = document.createElement('option');
+        option.value = themeKey;
+        option.textContent = THEME_LABELS[themeKey] || themeKey;
+        if (themeKey === currentValue) {
+          option.selected = true;
+        }
+        select.append(option);
+      });
+
+      group.append(label, select);
+      return { group, select };
+    }
+
+    const classGroup = createSelectGroup(
+      '類別圖主題 (Class Diagram Theme)：',
+      'github-commit-mermaid-class-theme',
+      settings.classDiagramTheme,
+    );
+
+    const generalGroup = createSelectGroup(
+      '一般圖表主題 (General Theme)：',
+      'github-commit-mermaid-general-theme',
+      settings.generalTheme,
+    );
+
+    const hint = document.createElement('div');
+    hint.className = 'github-commit-mermaid-settings-hint';
+    hint.textContent =
+      '提示：搭配 diff-explainer 類別圖時，推薦選擇 Neutral (簡潔灰階) 以清晰呈現 classDef 異動標籤色彩。';
+
+    const actions = document.createElement('div');
+    actions.className = 'github-commit-mermaid-settings-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className =
+      'github-commit-mermaid-btn github-commit-mermaid-btn-primary';
+    saveBtn.textContent = '儲存並套用';
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className =
+      'github-commit-mermaid-btn github-commit-mermaid-btn-secondary';
+    resetBtn.textContent = '重設為 Auto';
+
+    saveBtn.addEventListener('click', () => {
+      const newSettings = {
+        classDiagramTheme: classGroup.select.value,
+        generalTheme: generalGroup.select.value,
+      };
+      saveSettings(newSettings);
+      panel.remove();
+
+      const button = document.getElementById(BUTTON_ID);
       if (
         document.querySelector(
           `[${REPLACEMENT_ATTRIBUTE}="true"]`,
         )
       ) {
-        setButtonStatus(
-          button,
-          'Already rendered',
-        );
+        void replaceMermaidBlocks({ button, force: true });
+      }
+    });
 
-        return;
+    resetBtn.addEventListener('click', () => {
+      classGroup.select.value = 'auto';
+      generalGroup.select.value = 'auto';
+    });
+
+    actions.append(resetBtn, saveBtn);
+    body.append(classGroup.group, generalGroup.group, hint, actions);
+    panel.append(header, body);
+
+    document.body.append(panel);
+
+    panel.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+  }
+
+  async function replaceMermaidBlocks({ button, force = false } = {}) {
+    const targetBtn = button || document.getElementById(BUTTON_ID);
+
+    if (targetBtn) {
+      targetBtn.disabled = true;
+      targetBtn.textContent = 'Finding Mermaid…';
+    }
+
+    try {
+      const existingReplacement = document.querySelector(
+        `[${REPLACEMENT_ATTRIBUTE}="true"]`,
+      );
+
+      if (existingReplacement) {
+        if (!force) {
+          if (targetBtn) {
+            setButtonStatus(targetBtn, 'Already rendered');
+          }
+          return;
+        }
+
+        if (originalCommitElementSnapshot) {
+          const freshOriginal =
+            originalCommitElementSnapshot.cloneNode(true);
+          existingReplacement.replaceWith(freshOriginal);
+        }
       }
 
       const result =
         findCommitMessageWithMermaid();
 
       if (!result) {
-        setButtonStatus(
-          button,
-          'No Mermaid found',
-        );
-
+        if (targetBtn) {
+          setButtonStatus(
+            targetBtn,
+            'No Mermaid found',
+          );
+        }
         return;
       }
 
@@ -145,17 +429,20 @@
       ).length;
 
       if (diagramCount === 0) {
-        setButtonStatus(
-          button,
-          'No Mermaid found',
-        );
-
+        if (targetBtn) {
+          setButtonStatus(
+            targetBtn,
+            'No Mermaid found',
+          );
+        }
         return;
       }
 
       const mermaidApi = getMermaidApi();
-
       initializeMermaid(mermaidApi);
+
+      const settings = loadSettings();
+      const useDarkTheme = isGitHubDarkTheme();
 
       /*
        * Build the complete replacement in memory first.
@@ -175,14 +462,15 @@
             replacement,
             part.content,
           );
-
           continue;
         }
 
         renderedCount += 1;
 
-        button.textContent =
-          `Rendering ${renderedCount}/${diagramCount}…`;
+        if (targetBtn) {
+          targetBtn.textContent =
+            `Rendering ${renderedCount}/${diagramCount}…`;
+        }
 
         const diagramContainer =
           createDiagramContainer();
@@ -196,8 +484,16 @@
           container: diagramContainer,
           source: part.source,
           index: renderedCount - 1,
+          settings,
+          useDarkTheme,
         });
       }
+
+      /*
+       * Preserve original element clone for future re-render.
+       */
+      originalCommitElementSnapshot =
+        result.element.cloneNode(true);
 
       /*
        * Replace the original commit message element.
@@ -206,18 +502,22 @@
         replacement,
       );
 
-      setButtonStatus(
-        button,
-        `Rendered ${diagramCount}`,
-      );
+      if (targetBtn) {
+        setButtonStatus(
+          targetBtn,
+          `Rendered ${diagramCount}`,
+        );
+      }
     } catch (error) {
       console.error(
         '[GitHub Commit Mermaid] Render failed:',
         error,
       );
 
-      button.disabled = false;
-      button.textContent = 'Render failed';
+      if (targetBtn) {
+        targetBtn.disabled = false;
+        targetBtn.textContent = 'Render failed';
+      }
 
       window.alert(
         [
@@ -230,8 +530,10 @@
       );
 
       window.setTimeout(() => {
-        button.textContent =
-          'Render Mermaid';
+        if (targetBtn) {
+          targetBtn.textContent =
+            'Render Mermaid';
+        }
       }, 3000);
     }
   }
@@ -646,38 +948,10 @@
       return;
     }
 
-    const githubColorMode =
-      document.documentElement.getAttribute(
-        'data-color-mode',
-      );
-
-    const computedColorScheme =
-      window.getComputedStyle(
-        document.documentElement,
-      ).colorScheme;
-
-    const prefersDark =
-      window.matchMedia(
-        '(prefers-color-scheme: dark)',
-      ).matches;
-
-    const useDarkTheme =
-      githubColorMode === 'dark' ||
-      computedColorScheme.includes(
-        'dark',
-      ) ||
-      (
-        githubColorMode === 'auto' &&
-        prefersDark
-      );
-
     mermaidApi.initialize({
       startOnLoad: false,
       securityLevel: 'strict',
-      theme:
-        useDarkTheme
-          ? 'dark'
-          : 'default',
+      theme: isGitHubDarkTheme() ? 'dark' : 'default',
     });
 
     mermaidInitialized = true;
@@ -692,7 +966,7 @@
     const lines = source.split(/\r?\n/);
     const cleanedLines = [];
     const customRules = [];
-    const isClassDiagram = /^\s*classDiagram/i.test(source);
+    const isClassDiagram = isClassDiagramSource(source);
 
     for (const line of lines) {
       if (isClassDiagram) {
@@ -739,6 +1013,8 @@
     container,
     source,
     index,
+    settings,
+    useDarkTheme,
   }) {
     try {
       const renderId =
@@ -748,8 +1024,15 @@
           .toString(36)
           .slice(2);
 
+      const isClass = isClassDiagramSource(source);
+      const targetTheme = isClass
+        ? resolveTheme(settings?.classDiagramTheme, useDarkTheme)
+        : resolveTheme(settings?.generalTheme, useDarkTheme);
+
+      const themedSource = applyThemeDirective(source, targetTheme);
+
       const { cleanedSource, customRules } =
-        preprocessMermaidSource(source);
+        preprocessMermaidSource(themedSource);
 
       const result =
         await mermaidApi.render(
@@ -853,7 +1136,7 @@
       button.disabled = false;
 
       button.textContent =
-        'Render Mermaid';
+        'Re-render Mermaid';
     }, 2500);
   }
 
@@ -861,16 +1144,29 @@
     const style = document.createElement('style');
     style.id = 'github-commit-mermaid-styles';
     style.textContent = `
-      #${BUTTON_ID} {
+      #${CONTAINER_ID} {
         position: fixed;
         right: 20px;
         bottom: 20px;
         z-index: 2147483647;
 
-        padding: 10px 16px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+
+        padding: 4px;
+        border: 1px solid var(--borderColor-default, var(--color-border-default, #30363d));
+        border-radius: 8px;
+
+        background: var(--bgColor-muted, var(--color-canvas-subtle, #161b22));
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      }
+
+      #${BUTTON_ID} {
+        padding: 8px 14px;
 
         border: 1px solid #58a6ff;
-        border-radius: 7px;
+        border-radius: 6px;
 
         background: #1f6feb;
         color: #ffffff;
@@ -881,14 +1177,11 @@
           "Segoe UI",
           sans-serif;
 
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
 
         cursor: pointer;
-
-        box-shadow:
-          0 4px 16px
-          rgba(0, 0, 0, 0.4);
+        transition: background 0.15s ease;
       }
 
       #${BUTTON_ID}:hover:not(:disabled) {
@@ -898,6 +1191,165 @@
       #${BUTTON_ID}:disabled {
         cursor: progress;
         opacity: 0.75;
+      }
+
+      #${SETTINGS_BTN_ID} {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+
+        padding: 8px 10px;
+
+        border: 1px solid var(--borderColor-default, var(--color-border-default, #30363d));
+        border-radius: 6px;
+
+        background: var(--button-default-bgColor-rest, var(--color-btn-bg, #21262d));
+        color: var(--fgColor-default, var(--color-fg-default, #c9d1d9));
+
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+
+      #${SETTINGS_BTN_ID}:hover {
+        background: var(--button-default-bgColor-hover, var(--color-btn-hover-bg, #30363d));
+        border-color: var(--borderColor-muted, #8b949e);
+      }
+
+      #${SETTINGS_PANEL_ID} {
+        position: fixed;
+        right: 20px;
+        bottom: 74px;
+        z-index: 2147483647;
+
+        width: 330px;
+        padding: 16px;
+
+        background: var(--bgColor-default, var(--color-canvas-default, #0d1117));
+        border: 1px solid var(--borderColor-default, var(--color-border-default, #30363d));
+        border-radius: 10px;
+
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+        color: var(--fgColor-default, var(--color-fg-default, #e6edf3));
+        font-family:
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        font-size: 13px;
+      }
+
+      .github-commit-mermaid-settings-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+
+        border-bottom: 1px solid var(--borderColor-muted, var(--color-border-muted, #21262d));
+      }
+
+      .github-commit-mermaid-close-btn {
+        padding: 2px 6px;
+        border: none;
+        border-radius: 4px;
+
+        background: transparent;
+        color: var(--fgColor-muted, var(--color-fg-muted, #8b949e));
+
+        font-size: 15px;
+        cursor: pointer;
+      }
+
+      .github-commit-mermaid-close-btn:hover {
+        background: var(--bgColor-muted, var(--color-canvas-subtle, #161b22));
+        color: var(--fgColor-default, var(--color-fg-default, #f0f6fc));
+      }
+
+      .github-commit-mermaid-setting-group {
+        margin-bottom: 12px;
+      }
+
+      .github-commit-mermaid-setting-group label {
+        display: block;
+        margin-bottom: 5px;
+
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--fgColor-default, var(--color-fg-default, #e6edf3));
+      }
+
+      .github-commit-mermaid-setting-group select {
+        width: 100%;
+        padding: 6px 10px;
+
+        border: 1px solid var(--borderColor-default, var(--color-border-default, #30363d));
+        border-radius: 6px;
+
+        background: var(--bgColor-muted, var(--color-canvas-subtle, #161b22));
+        color: var(--fgColor-default, var(--color-fg-default, #e6edf3));
+
+        font-size: 13px;
+        outline: none;
+      }
+
+      .github-commit-mermaid-setting-group select:focus {
+        border-color: #58a6ff;
+        box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.3);
+      }
+
+      .github-commit-mermaid-settings-hint {
+        margin-top: 10px;
+        margin-bottom: 14px;
+
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--fgColor-muted, var(--color-fg-muted, #8b949e));
+      }
+
+      .github-commit-mermaid-settings-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+
+        margin-top: 14px;
+        padding-top: 10px;
+
+        border-top: 1px solid var(--borderColor-muted, var(--color-border-muted, #21262d));
+      }
+
+      .github-commit-mermaid-btn {
+        padding: 5px 12px;
+
+        border: 1px solid transparent;
+        border-radius: 6px;
+
+        font-size: 12px;
+        font-weight: 600;
+
+        cursor: pointer;
+      }
+
+      .github-commit-mermaid-btn-primary {
+        border-color: #2ea043;
+        background: #238636;
+        color: #ffffff;
+      }
+
+      .github-commit-mermaid-btn-primary:hover {
+        background: #2ea043;
+      }
+
+      .github-commit-mermaid-btn-secondary {
+        border-color: var(--borderColor-default, var(--color-border-default, #30363d));
+        background: var(--button-default-bgColor-rest, var(--color-btn-bg, #21262d));
+        color: var(--fgColor-default, var(--color-fg-default, #c9d1d9));
+      }
+
+      .github-commit-mermaid-btn-secondary:hover {
+        background: var(--button-default-bgColor-hover, var(--color-btn-hover-bg, #30363d));
       }
 
       /*
