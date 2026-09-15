@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         GitHub Commit Mermaid Renderer
 // @namespace    github-commit-mermaid
-// @version      4.2.0
+// @version      4.3.1
 // @description  Replace Mermaid source blocks in GitHub commit messages with vertically stacked rendered diagrams.
 // @match        https://github.com/*
-// @require      https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js
+// @require      https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js
 // @run-at       document-idle
-// @grant        GM_addStyle
-// @sandbox      DOM
+// @grant        none
 // ==/UserScript==
 
 (() => {
@@ -618,7 +617,11 @@
     const api =
       typeof mermaid !== 'undefined'
         ? mermaid
-        : globalThis.mermaid;
+        : typeof globalThis !== 'undefined' && globalThis
+          ? globalThis.mermaid
+          : typeof window !== 'undefined'
+            ? window.mermaid
+            : undefined;
 
     if (
       !api ||
@@ -680,6 +683,57 @@
     mermaidInitialized = true;
   }
 
+  /**
+   * Preprocesses Mermaid source code to resolve compatibility issues with
+   * classDiagram classDef syntax in Mermaid 10, converting multi-attribute
+   * classDef statements into scoped SVG CSS styles.
+   */
+  function preprocessMermaidSource(source) {
+    const lines = source.split(/\r?\n/);
+    const cleanedLines = [];
+    const customRules = [];
+    const isClassDiagram = /^\s*classDiagram/i.test(source);
+
+    for (const line of lines) {
+      if (isClassDiagram) {
+        const match = line.match(/^\s*classDef\s+([a-zA-Z0-9_-]+)\s+(.*)$/);
+        if (match) {
+          const className = match[1];
+          const rawStyles = match[2].trim().replace(/;$/, '');
+          const styleDeclarations = rawStyles
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => {
+              const colonIndex = s.indexOf(':');
+              if (colonIndex === -1) return '';
+              const prop = s.slice(0, colonIndex).trim();
+              const val = s.slice(colonIndex + 1).trim();
+              return `${prop}: ${val} !important;`;
+            })
+            .filter(Boolean)
+            .join(' ');
+
+          if (styleDeclarations) {
+            customRules.push(
+              `.github-commit-mermaid-diagram g.${className} rect, ` +
+              `.github-commit-mermaid-diagram g.${className} polygon, ` +
+              `.github-commit-mermaid-diagram g.${className} path, ` +
+              `.github-commit-mermaid-diagram .${className} { ${styleDeclarations} }`
+            );
+          }
+          continue;
+        }
+      }
+      cleanedLines.push(line);
+    }
+
+    return {
+      cleanedSource: cleanedLines.join('\n'),
+      customRules,
+    };
+  }
+
   async function renderDiagram({
     mermaidApi,
     container,
@@ -694,14 +748,23 @@
           .toString(36)
           .slice(2);
 
+      const { cleanedSource, customRules } =
+        preprocessMermaidSource(source);
+
       const result =
         await mermaidApi.render(
           renderId,
-          source,
+          cleanedSource,
         );
 
       container.innerHTML =
         result.svg;
+
+      if (customRules.length > 0) {
+        const customStyleEl = document.createElement('style');
+        customStyleEl.textContent = customRules.join('\n');
+        container.append(customStyleEl);
+      }
 
       if (
         typeof result.bindFunctions ===
@@ -795,7 +858,9 @@
   }
 
   function addStyles() {
-    GM_addStyle(`
+    const style = document.createElement('style');
+    style.id = 'github-commit-mermaid-styles';
+    style.textContent = `
       #${BUTTON_ID} {
         position: fixed;
         right: 20px;
@@ -981,6 +1046,7 @@
             )
           );
       }
-    `);
+    `;
+    document.head.append(style);
   }
 })();
